@@ -1,1 +1,1005 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Smart City Environmental Monitoring System - Unit 3 Assignment
+
+# Create a Parameter to Prompt while creating the CloudFormation Stack to select the pre-created Key-Pair for EC2 access.
+Parameters:
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Type: AWS::EC2::KeyPair::KeyName
+
+Resources:
+  # Create a VPC
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      Tags:
+        - Key: Name
+          Value: IoTVPC
+  
+  # Create a Subnet for IoT Devices
+  SubnetIoT:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.0.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: IoTSubnet
+
+ # Subnet for ECS in Availability Zone 1
+  SubnetECS1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select
+        - 0 # Select first AZ
+        - !GetAZs
+          Ref: "AWS::Region"  
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: ECSSubnet1
+
+  # Subnet for ECS in Availability Zone 2
+  SubnetECS2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select
+        - 1 # Select first AZ
+        - !GetAZs
+          Ref: "AWS::Region"  
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: ECSSubnet2
+
+  # Create an Internet Gateway
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: IoTInternetGateway
+
+  # Attach the Internet Gateway to the VPC
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Create a Route Table
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: IoTRouteTable
+
+  # Create a Route in the Route Table
+  Route:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  # Associate the Subnet with the Route Table
+  SubnetRouteTableAssociationIoT:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetIoT
+      RouteTableId: !Ref RouteTable
+
+  # Associate Private Route Table with ECS Subnet 1
+  SubnetRouteTableAssociationECS1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetECS1
+      RouteTableId: !Ref RouteTable
+
+  # Associate Private Route Table with ECS Subnet 2
+  SubnetRouteTableAssociationECS2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetECS2
+      RouteTableId: !Ref RouteTable
+
+  # Create a Security Group for IoT Devices
+  SecurityGroupIoT:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSH and MQTT access
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 8883
+          ToPort: 8883
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: IoTDeviceSecurityGroup
+
+  # Create a Security Group for ECS
+  SecurityGroupECS:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP access
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: ECSSecurityGroup
+
+  # Security Group for the Application Load Balancer
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP and HTTPS traffic to ALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+
+  # Create an IoT Policy
+  IoTPolicy:
+    Type: AWS::IoT::Policy
+    DeletionPolicy: "Delete"
+    Properties:
+      PolicyName: IoTPolicy
+      PolicyDocument: |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": [
+                "iot:Connect",
+                "iot:Publish",
+                "iot:Subscribe",
+                "iot:Receive"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "iot:AttachPolicy",
+                "iot:AttachPrincipalPolicy",
+                "iot:DescribeEndpoint"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "iot:AssumeRoleWithCertificate"
+              ],
+              "Resource": "*"
+            }
+          ]
+        }
+      Tags:
+        - Key: Name
+          Value: IoTPolicy
+
+  # Create an IoT Thing
+  IoTThing:
+    Type: AWS::IoT::Thing
+    DeletionPolicy: "Delete"
+    Properties:
+      ThingName: EnvironmentalSensor
+
+  # Create an IAM Role for EC2 with IoT access
+  Ec2IoTRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: Ec2-IoT
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: Ec2IoTCustomPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iot:DescribeEndpoint
+                  - iot:CreateKeysAndCertificate
+                  - iot:AttachThingPrincipal
+                  - iot:ListCertificates
+                  - iot:AttachPolicy
+                Resource: "*"
+      Tags:
+        - Key: Name
+          Value: Ec2-IoT
+
+  Ec2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: Ec2InstanceProfile
+      Roles:
+        - Ref: Ec2IoTRole
+
+  # Create an EC2 Instance 
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      KeyName: !Ref KeyName
+      ImageId: ami-0427090fd1714168b
+      IamInstanceProfile: !Ref Ec2InstanceProfile
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: '0'
+          SubnetId: !Ref SubnetIoT
+          GroupSet:
+            - !Ref SecurityGroupIoT
+      Tags:
+        - Key: Name
+          Value: IoT_Device_VM
+      # Execute following user data on EC2's shell
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+        
+          # Update the system and install Python and the IoT SDK
+          yum update -y
+          yum install python3 -y
+          yum install python3-pip -y
+          yum install aws-cli -y
+          sudo pip3 install AWSIoTPythonSDK
+
+          # Configure AWS Cli with empty credentials and specify the region
+          mkdir /home/ec2-user/.aws
+          echo -e "[default]\nregion = us-east-1" >> /home/ec2-user/.aws/config
+          
+          # Create and download IoT Device Certificates
+          mkdir -p /home/ec2-user/certs
+          aws iot create-keys-and-certificate --set-as-active --certificate-pem-outfile /home/ec2-user/certs/EnvironmentalSensor.pem.crt --private-key-outfile /home/ec2-user/certs/EnvironmentalSensor.pem.key --public-key-outfile /home/ec2-user/certs/EnvironmentalSensor.pem.key
+          wget -O /home/ec2-user/certs/AmazonRootCA1.pem https://www.amazontrust.com/repository/AmazonRootCA1.pem
+
+          # Create a shell script (Preparingcmd.sh) that creates another shell script (IotCertAttach.sh) with commands to link IoT Policy, Certificates, and IoT Thing
+          cat <<"EOF" > /home/ec2-user/Preparingcmd.sh
+          #! /bin/bash
+          certificateArn=$(aws iot list-certificates | grep "certificateArn" | sed 's/.*"://' | sed 's/,//g')
+          echo "aws iot attach-policy --target $certificateArn --policy-name IoTPolicy" > /home/ec2-user/IotCertAttach.sh
+          echo "aws iot attach-thing-principal --principal  "$certificateArn" --thing-name EnvironmentalSensor" >> /home/ec2-user/IotCertAttach.sh
+          echo "aws iot describe-endpoint --endpoint-type iot:Data-ATS | grep "ats.iot" | sed 's/^.*://g' > /home/ec2-user/iotTEndpoint" >> /home/ec2-user/IotCertAttach.sh
+          EOF
+          
+          # Assign execute permission and execute both shell scripts
+          chmod +x /home/ec2-user/Preparingcmd.sh
+          sh /home/ec2-user/Preparingcmd.sh
+
+          chmod +x /home/ec2-user/IotCertAttach.sh
+          sh /home/ec2-user/IotCertAttach.sh
+
+
+          # Create a Python Script that simulates an IoT Sensor 
+          cat <<EOF > /home/ec2-user/EnvironmentalSensor1.py
+          import time
+          import json
+          from AWSIoTPythonSDK.MQTTLib import AWSIoTMQTTClient
+
+          ENDPOINT = $(cat /home/ec2-user/iotTEndpoint)
+          CLIENT_ID = "EnvironmentalSensor1"
+          TOPIC = "environmental/sensor"
+          ROOT_CA = "/home/ec2-user/certs/AmazonRootCA1.pem"
+          PRIVATE_KEY = "/home/ec2-user/certs/EnvironmentalSensor.pem.key"
+          CERTIFICATE = "/home/ec2-user/certs/EnvironmentalSensor.pem.crt"
+
+          client = AWSIoTMQTTClient(CLIENT_ID)
+          client.configureEndpoint(ENDPOINT, 8883)
+          client.configureCredentials(ROOT_CA, PRIVATE_KEY, CERTIFICATE)
+
+          client.configureAutoReconnectBackoffTime(1, 32, 20)
+          client.configureOfflinePublishQueueing(-1)
+          client.configureDrainingFrequency(2)
+          client.configureConnectDisconnectTimeout(10)
+          client.configureMQTTOperationTimeout(5)
+
+          client.connect()
+
+          def get_sensor_data():
+              return {
+                  "device_id": CLIENT_ID,
+                  "temperature": 25.0 + (5.0 * (0.5 - time.time() % 1)),
+                  "humidity": 60.0 + (10.0 * (0.5 - time.time() % 1)),
+                  "air_quality": 80.0 + (5.0 * (0.5 - time.time() % 1))
+              }
+
+          while True:
+              sensor_data = get_sensor_data()
+              message = json.dumps(sensor_data)
+              client.publish(TOPIC, message, 1)
+              print(f"Published: {message}")
+              time.sleep(60)
+          EOF
+
+          # Change the owner of the IoT certificates and the Python script to ec2-user
+          sudo chown -R ec2-user:ec2-user /home/ec2-user/certs
+          sudo chown ec2-user:ec2-user /home/ec2-user/EnvironmentalSensor1.py
+
+          # Create a SystemD Service Unit for IoT Sensor Python Script
+          cat <<EOF > /etc/systemd/system/environmentalSensor1.service
+          [Unit]
+          Description=IoT Sensor EnvironmentalSensor1 sending data to IoT TOPIC
+          After=network.target
+
+          [Service]
+          Type=idle
+          ExecStart=/usr/bin/python3 /home/ec2-user/EnvironmentalSensor1.py
+          Restart=on-failure
+
+          [Install]
+          WantedBy=default.target
+          EOF
+
+          # Enable and Start the Service Unit.
+          systemctl daemon-reload
+          systemctl enable environmentalSensor1.service
+          systemctl start environmentalSensor1.service
+
+          # Reboot the instance
+          sudo systemctl reboot
+
+  # Create a KMS Key
+  KMSKey:
+    Type: AWS::KMS::Key
+    Properties: 
+      Description: "KMS key for Timestream database"
+      KeyPolicy: 
+        Version: "2012-10-17"
+        Id: "key-default-1"
+        Statement:
+          - Sid: "Enable IAM User Permissions"
+            Effect: "Allow"
+            Principal: 
+              AWS: 
+                - !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: 
+              - "kms:*"
+            Resource: "*"
+
+  # Create the Timestream Database
+  TimestreamDatabase:
+    Type: AWS::Timestream::Database
+    Properties:
+      DatabaseName: "EnvironmentalMonitoring"
+      KmsKeyId: !Ref KMSKey
+
+  # Create the Timestream Table
+  TimestreamTable:
+    Type: AWS::Timestream::Table
+    Properties:
+      DatabaseName: !Ref TimestreamDatabase
+      TableName: "SensorData"
+
+  # Create the Lambda execution role with required policies
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: LambdaExecutionRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaTimestreamPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - timestream:DescribeEndpoints
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - timestream:WriteRecords
+                Resource: !Sub arn:aws:timestream:${AWS::Region}:${AWS::AccountId}:database/EnvironmentalMonitoring/table/SensorData
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                Resource: !GetAtt KMSKey.Arn
+
+  # Create the Lambda Function
+  ProcessSensorData:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: ProcessSensorData
+      Runtime: python3.8
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import time
+
+          timestream = boto3.client('timestream-write')
+
+          def lambda_handler(event, context):
+              # Log the received event for debugging
+              print(f"Received event: {json.dumps(event)}")
+
+              try:
+                  # Check if the event contains a 'body' key
+                  if 'body' in event:
+                      payload = json.loads(event['body'])
+                  else:
+                      payload = event
+                  
+                  current_time = str(int(time.time() * 1000))  # Timestream expects the time in milliseconds since the epoch
+
+                  dimensions = [{'Name': 'DeviceId', 'Value': payload['device_id']}]
+                  measures = [
+                      {'Name': 'Temperature', 'Value': str(payload['temperature']), 'Type': 'DOUBLE'},
+                      {'Name': 'Humidity', 'Value': str(payload['humidity']), 'Type': 'DOUBLE'},
+                      {'Name': 'AirQuality', 'Value': str(payload['air_quality']), 'Type': 'DOUBLE'}
+                  ]
+
+                  # Write records to Timestream
+                  timestream.write_records(
+                      DatabaseName='EnvironmentalMonitoring',
+                      TableName='SensorData',
+                      Records=[{
+                          'Dimensions': dimensions,
+                          'MeasureName': 'EnvironmentData',
+                          'MeasureValueType': 'MULTI',
+                          'Time': current_time,
+                          'TimeUnit': 'MILLISECONDS',
+                          'MeasureValues': measures
+                      }]
+                  )
+              except KeyError as e:
+                  print(f"KeyError: {e}")
+                  raise e
+              except Exception as e:
+                  print(f"Error: {e}")
+                  raise e
+
+  # Create the IoT Rule
+  IoTTopicRule:
+    Type: AWS::IoT::TopicRule
+    Properties:
+      RuleName: "ProcessSensorDataRule"
+      TopicRulePayload:
+        Sql: "SELECT * FROM 'environmental/sensor'"
+        Actions:
+          - Lambda:
+              FunctionArn: !GetAtt ProcessSensorData.Arn
+        RuleDisabled: false
+        AwsIotSqlVersion: "2016-03-23"
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ProcessSensorData.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: "iot.amazonaws.com"
+      SourceArn: !GetAtt IoTTopicRule.Arn
+
+  # Create ECR Repository
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: scemsd-ecr-registry
+      ImageScanningConfiguration:
+        scanOnPush: true
+      Tags:
+        - Key: Name
+          Value: scemsd-ecr-registry
+
+  # Create CodeBuild Service Role  
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: scemsd-codebuild-service-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildBasePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/scemsd-codebuild-*"
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketAcl
+                  - s3:GetBucketLocation
+                Resource:
+                  - !Sub "arn:aws:s3:::codepipeline-${AWS::Region}-${AWS::AccountId}/*"
+              - Effect: Allow
+                Action:
+                  - codecommit:GitPull
+                Resource:
+                  - !Sub "arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:scemsd-codecommit-repository"
+              - Effect: Allow
+                Action:
+                  - codebuild:CreateReportGroup
+                  - codebuild:CreateReport
+                  - codebuild:UpdateReport
+                  - codebuild:BatchPutTestCases
+                  - codebuild:BatchPutCodeCoverages
+                Resource:
+                  - !Sub "arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:report-group/scemsd-codebuild-*"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser  
+
+  # Create CodePipeline Service Role
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: scemsd-codepipeline-service-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodePipelineServicePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  - iam:PassRole
+                Resource: "*"
+                Effect: Allow
+                Condition: 
+                  StringEqualsIfExists: 
+                    iam:PassedToService: 
+                      - cloudformation.amazonaws.com
+                      - elasticbeanstalk.amazonaws.com
+                      - ec2.amazonaws.com
+                      - ecs-tasks.amazonaws.com
+              - Action: 
+                  - codecommit:CancelUploadArchive
+                  - codecommit:GetBranch
+                  - codecommit:GetCommit
+                  - codecommit:GetRepository
+                  - codecommit:GetUploadArchiveStatus
+                  - codecommit:UploadArchive
+                Resource: "*"
+                Effect: Allow
+              - Action: 
+                  - codedeploy:CreateDeployment
+                  - codedeploy:GetApplication
+                  - codedeploy:GetApplicationRevision
+                  - codedeploy:GetDeployment
+                  - codedeploy:GetDeploymentConfig
+                  - codedeploy:RegisterApplicationRevision
+                Resource: "*"
+                Effect: Allow
+              - Action: 
+                  - codestar-connections:UseConnection
+                Resource: "*"
+                Effect: Allow
+              - Action: 
+                  - elasticbeanstalk:*
+                  - ec2:*
+                  - elasticloadbalancing:*
+                  - autoscaling:*
+                  - cloudwatch:*
+                  - s3:*
+                  - sns:*
+                  - cloudformation:*
+                  - rds:*
+                  - sqs:*
+                  - ecs:*
+                Resource: "*"
+                Effect: Allow
+              - Action: 
+                  - lambda:InvokeFunction
+                  - lambda:ListFunctions
+                Resource: "*"
+                Effect: Allow
+              - Action: 
+                  - opsworks:CreateDeployment
+                  - opsworks:DescribeApps
+                  - opsworks:DescribeCommands
+                  - opsworks:DescribeDeployments
+                  - opsworks:DescribeInstances
+                  - opsworks:DescribeStacks
+                  - opsworks:UpdateApp
+                  - opsworks:UpdateStack
+                Resource: "*"
+                Effect: Allow
+              - Action: 
+                  - cloudformation:CreateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:UpdateStack
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:SetStackPolicy
+                  - cloudformation:ValidateTemplate
+                Resource: "*"
+                Effect: Allow
+              - Action: 
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuildBatches
+                  - codebuild:StartBuildBatch
+                Resource: "*"
+                Effect: Allow
+              - Effect: Allow
+                Action:
+                  - devicefarm:ListProjects
+                  - devicefarm:ListDevicePools
+                  - devicefarm:GetRun
+                  - devicefarm:GetUpload
+                  - devicefarm:CreateUpload
+                  - devicefarm:ScheduleRun
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - servicecatalog:ListProvisioningArtifacts
+                  - servicecatalog:CreateProvisioningArtifact
+                  - servicecatalog:DescribeProvisioningArtifact
+                  - servicecatalog:DeleteProvisioningArtifact
+                  - servicecatalog:UpdateProduct
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - cloudformation:ValidateTemplate
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ecr:DescribeImages
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - states:DescribeExecution
+                  - states:DescribeStateMachine
+                  - states:StartExecution
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - appconfig:StartDeployment
+                  - appconfig:StopDeployment
+                  - appconfig:GetDeployment
+                Resource: "*"
+
+  # Creat S3 Bucke for Codepipeline
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "codepipeline-${AWS::Region}-${AWS::AccountId}"
+
+
+  # Create ECS Cluster
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: scemsd-ecs-cluster
+
+  # ECS Task Execution Role
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ecsTaskExecutionRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+
+  # ECS Task Role
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ECSTaskRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ECSMinimalTimestreamAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - timestream:DescribeEndpoints
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - timestream:Query
+                  - timestream:Select
+                Resource: 
+                  - !Sub arn:aws:timestream:us-east-1:${AWS::AccountId}:database/EnvironmentalMonitoring
+                  - !Sub arn:aws:timestream:us-east-1:${AWS::AccountId}:database/EnvironmentalMonitoring/table/SensorData
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                Resource: !GetAtt KMSKey.Arn
+
+                
+  # ECS Task Definition
+  ECSTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: scemsd-ecs-cluster-task
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 256
+      Memory: 512
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      ContainerDefinitions:
+        - Name: scems-dashboard
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/scemsd-ecr-registry:latest"
+          Essential: true
+          PortMappings:
+            - ContainerPort: 80
+              HostPort: 80
+          Environment:
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+
+  # Target Group for ECS Service
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: "scems-dashboard-alb-target-group"
+      VpcId: !Ref VPC
+      Port: 80
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: "/"
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 3
+      UnhealthyThresholdCount: 3
+
+  # ALB Listener
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+
+
+  # Application Load Balancer
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: "scems-dashboard"
+      Scheme: internet-facing
+      Subnets:
+      - !Ref SubnetECS1
+      - !Ref SubnetECS2  # Ensure this is a different AZ
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '60'
+
+  # ECS Service
+  ECSService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: scemsd-ecs-cluster-service
+      Cluster: !Ref ECSCluster
+      DesiredCount: 1
+      LaunchType: FARGATE
+      TaskDefinition: !Ref ECSTaskDefinition
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets:
+            - !Ref SubnetECS1
+            - !Ref SubnetECS2
+          SecurityGroups:
+            - !Ref SecurityGroupECS
+          AssignPublicIp: ENABLED
+      LoadBalancers:
+        - ContainerName: scems-dashboard
+          ContainerPort: 80
+          TargetGroupArn: !Ref ALBTargetGroup
+    DependsOn:
+      - ApplicationLoadBalancer  # Ensure that the ALB is created first
+      - ALBListener  # Ensure that the ALB Listener is created first
+      - ALBTargetGroup  # Ensure that the Target Group is created first  
+
+  # CodePipeline
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: scemsd-pipeline
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref S3Bucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: 1
+              OutputArtifacts:
+                - Name: source_output
+              Configuration:
+                RepositoryName: scemsd-codecommit-repository
+                BranchName: master
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              InputArtifacts:
+                - Name: source_output
+              OutputArtifacts:
+                - Name: build_output
+              Configuration:
+                ProjectName: scemsd-codebuild-project
+              RunOrder: 1
+        - Name: Deploy
+          Actions:
+            - Name: Deploy
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: ECS
+                Version: 1
+              InputArtifacts:
+                - Name: build_output
+              Configuration:
+                ClusterName: scemsd-ecs-cluster
+                ServiceName: scemsd-ecs-cluster-service
+                FileName: imagedefinitions.json
+              RunOrder: 1
+
+  # CodeBuild Project
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: scemsd-codebuild-project
+      Source:
+        Type: CODECOMMIT
+        Location: scemsd-codecommit-repository
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:4.0
+        Type: LINUX_CONTAINER
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+
+  
+Outputs:
+  IoTThingName:
+    Description: Name of the IoT Thing
+    Value: !Ref IoTThing
+
+  EC2InstanceId:
+    Description: Instance ID of the EC2 instance
+    Value: !Ref EC2Instance
+
+  EC2PublicDNS:
+    Description: Public DNS of the EC2 instance
+    Value: !GetAtt EC2Instance.PublicDnsName
+
+  KMSKeyId:
+    Description: ID of the KMS Key
+    Value: !Ref KMSKey
+
+  KMSKeyArn:
+    Description: ARN of the KMS Key
+    Value: !GetAtt KMSKey.Arn
+
+  TimestreamDatabaseName:
+    Description: Name of the Timestream Database
+    Value: !Ref TimestreamDatabase
+
+  TimestreamTableName:
+    Description: Name of the Timestream Table
+    Value: !Ref TimestreamTable
+
+  ECRRepositoryUri:
+    Description: URI of the ECR Repository
+    Value: !GetAtt ECRRepository.RepositoryUri
+
+  ECSClusterName:
+    Description: Name of the ECS Cluster
+    Value: !Ref ECSCluster
+
+  ECSTaskDefinitionArn:
+    Description: ARN of the ECS Task Definition
+    Value: !Ref ECSTaskDefinition
+
+  ECSServiceName:
+    Description: Name of the ECS Service
+    Value: !Ref ECSService
+  
+  ALBDNSName:
+    Description: DNS Name of the Application Load Balancer
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+
+
+  # Note: While this stack is deleting, if it fails, then:
+  # IoT Core:
+  #   I. Security --> Certificates: Detach IoT Policy and IoT Thing
+  #   II. Security --> Policies: Delete Policy
+  #   III. Manage --> All Devices --> Things: Delete IoT Thing
+
+
+
+
+
 
